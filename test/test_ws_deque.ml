@@ -62,10 +62,16 @@ let%expect_test "push and steal" =
   let stealers = 3 in
   let barrier = Barrier.create (stealers + 1) in
   for _ = 0 to stealers - 1 do
-    Multicore.spawn (fun () ->
-      let v = Ws_deque.steal_exn t in
-      print_s [%message (v : int)];
-      Barrier.await barrier)
+    match
+      Multicore.spawn
+        (fun () ->
+          let v = Ws_deque.steal_exn t in
+          print_s [%message (v : int)];
+          Barrier.await barrier)
+        ()
+    with
+    | Spawned -> ()
+    | Failed ((), exn, bt) -> Exn.raise_with_original_backtrace exn bt
   done;
   Barrier.await barrier;
   print_lines_sorted [%expect.output];
@@ -100,47 +106,60 @@ let%expect_test "concurrent workload" =
   in
   (* The owner thread. *)
   let barrier = Barrier.create (thieves + 2) in
-  Multicore.spawn (fun () ->
-    let owner = Capsule.Isolated.unwrap owner in
-    let n = ref n in
-    let push () =
-      let x : int = fresh () in
-      Ws_deque.push owner x;
-      push_back pushed x;
-      Int.decr n
-    and pop () =
-      match pop' owner with
-      | Null -> false
-      | This x ->
-        push_back popped x;
-        true
-    in
-    let rec loop () =
-      if !n > 0
-      then (
-        (* More pushes are allowed. *)
-        (* Choose between pushing and popping; then continue. *)
-        if Random.bool () then push () else ignore (pop () : bool);
-        loop ())
-      else if (* No more pushes are allowed. Pop and continue. *)
-              pop ()
-      then loop ()
-    in
-    loop ();
-    Barrier.await barrier);
+  (match
+     Multicore.spawn
+       (fun () ->
+         let owner = Capsule.Isolated.unwrap owner in
+         let n = ref n in
+         let push () =
+           let x : int = fresh () in
+           Ws_deque.push owner x;
+           push_back pushed x;
+           Int.decr n
+         and pop () =
+           match pop' owner with
+           | Null -> false
+           | This x ->
+             push_back popped x;
+             true
+         in
+         let rec loop () =
+           if !n > 0
+           then (
+             (* More pushes are allowed. *)
+             (* Choose between pushing and popping; then continue. *)
+             if Random.bool () then push () else ignore (pop () : bool);
+             loop ())
+           else if (* No more pushes are allowed. Pop and continue. *)
+                   pop ()
+           then loop ()
+         in
+         loop ();
+         Barrier.await barrier)
+       ()
+   with
+   | Spawned -> ()
+   | Failed ((), exn, bt) -> Exn.raise_with_original_backtrace exn bt);
   (* The thief threads. *)
   for i = 0 to thieves - 1 do
-    Multicore.spawn (fun () ->
-      let steal () =
-        match Ws_deque.steal stealer with
-        | Null -> Basement.Stdlib_shim.Domain.cpu_relax ()
-        | This x ->
-          Capsule.With_mutex.iter stolen ~f:(fun stolen -> stolen.(i) <- x :: stolen.(i))
-      in
-      for _ = 1 to attempts do
-        steal ()
-      done;
-      Barrier.await barrier)
+    match
+      Multicore.spawn
+        (fun () ->
+          let steal () =
+            match Ws_deque.steal stealer with
+            | Null -> Basement.Stdlib_shim.Domain.cpu_relax ()
+            | This x ->
+              Capsule.With_mutex.iter stolen ~f:(fun stolen ->
+                stolen.(i) <- x :: stolen.(i))
+          in
+          for _ = 1 to attempts do
+            steal ()
+          done;
+          Barrier.await barrier)
+        ()
+    with
+    | Spawned -> ()
+    | Failed ((), exn, bt) -> Exn.raise_with_original_backtrace exn bt
   done;
   (* Wait for every thread to complete. *)
   Barrier.await barrier;
@@ -215,11 +234,17 @@ module One_producer_one_stealer = struct
        list.*)
     let barrier = Barrier.create 2 in
     let steal_list : int option list Atomic.t = Atomic.make [] in
-    Multicore.spawn (fun () ->
-      List.init n ~f:(fun _ -> steal' stealer |> Or_null.to_option)
-      |> List.rev
-      |> Atomic.set steal_list;
-      Barrier.await barrier);
+    (match
+       Multicore.spawn
+         (fun () ->
+           List.init n ~f:(fun _ -> steal' stealer |> Or_null.to_option)
+           |> List.rev
+           |> Atomic.set steal_list;
+           Barrier.await barrier)
+         ()
+     with
+     | Spawned -> ()
+     | Failed ((), exn, bt) -> Exn.raise_with_original_backtrace exn bt);
     Barrier.await barrier;
     let steal_list = Atomic.get steal_list in
     (* The stolen values should be the [n]th first elements of [l]*)
@@ -255,12 +280,18 @@ module One_producer_one_stealer = struct
        it is registered as [Some v] in the returned list whereas any
        [Exit] raised is registered as a [None].*)
     let steal_list : int option list Atomic.t = Atomic.make [] in
-    Multicore.spawn (fun () ->
-      Barrier.await barrier;
-      List.init n ~f:(fun _ -> steal' stealer |> Or_null.to_option)
-      |> List.rev
-      |> Atomic.set steal_list;
-      Barrier.await barrier);
+    (match
+       Multicore.spawn
+         (fun () ->
+           Barrier.await barrier;
+           List.init n ~f:(fun _ -> steal' stealer |> Or_null.to_option)
+           |> List.rev
+           |> Atomic.set steal_list;
+           Barrier.await barrier)
+         ()
+     with
+     | Spawned -> ()
+     | Failed ((), exn, bt) -> Exn.raise_with_original_backtrace exn bt);
     Barrier.await barrier;
     (* Main domain pushes. *)
     let owner = Capsule.Isolated.unwrap owner in
@@ -306,12 +337,18 @@ module One_producer_one_stealer = struct
          it is registered as [Some v] in the returned list whereas any [Exit]
          raised, it is registered as a [None].*)
       let steal_list : int option list Atomic.t = Atomic.make [] in
-      Multicore.spawn (fun () ->
-        Barrier.await barrier;
-        List.init nsteal ~f:(fun _ -> steal' stealer |> Or_null.to_option)
-        |> List.rev
-        |> Atomic.set steal_list;
-        Barrier.await barrier);
+      (match
+         Multicore.spawn
+           (fun () ->
+             Barrier.await barrier;
+             List.init nsteal ~f:(fun _ -> steal' stealer |> Or_null.to_option)
+             |> List.rev
+             |> Atomic.set steal_list;
+             Barrier.await barrier)
+           ()
+       with
+       | Spawned -> ()
+       | Failed ((), exn, bt) -> Exn.raise_with_original_backtrace exn bt);
       Barrier.await barrier;
       (* Main domain pops and builds a list of popped values. *)
       let pop_list =
@@ -361,8 +398,12 @@ module%test One_producer_two_stealers = struct
       Atomic.set result (Array.to_list res);
       Barrier.await done_barrier
     in
-    Multicore.spawn (fun () -> multiple_steal stealer ns1 result1);
-    Multicore.spawn (fun () -> multiple_steal stealer ns2 result2);
+    (match Multicore.spawn (fun () -> multiple_steal stealer ns1 result1) () with
+     | Spawned -> ()
+     | Failed ((), exn, bt) -> Exn.raise_with_original_backtrace exn bt);
+    (match Multicore.spawn (fun () -> multiple_steal stealer ns2 result2) () with
+     | Spawned -> ()
+     | Failed ((), exn, bt) -> Exn.raise_with_original_backtrace exn bt);
     Barrier.await done_barrier;
     let steal_list1 = Atomic.get result1 in
     let steal_list2 = Atomic.get result2 in
