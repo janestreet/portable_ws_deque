@@ -28,9 +28,9 @@
 *)
 
 open! Base
+open Basement
 open Modes
 module Atomic = Portable_kernel.Atomic
-module Backoff = Basement.Stdlib_shim.Backoff
 
 (** This must be a power of two. *)
 let min_capacity = 16
