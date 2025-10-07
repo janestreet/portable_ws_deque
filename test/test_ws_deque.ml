@@ -1,8 +1,8 @@
 open! Base
+open Portable
+open Await
 open Base_quickcheck
 open Expect_test_helpers_base
-open Portable
-open Portable_test_helpers
 module Ws_deque = Portable_ws_deque
 
 let print_lines_sorted s =
@@ -55,25 +55,18 @@ let%expect_test "push and pop" =
 ;;
 
 let%expect_test "push and steal" =
+  let%with.tilde.stack conc = Concurrent_in_thread.with_concurrent Terminator.never in
   let t = Ws_deque.create () in
   Ws_deque.push t 1;
   Ws_deque.push t 10;
   Ws_deque.push t 100;
   let stealers = 3 in
-  let barrier = Barrier.create (stealers + 1) in
-  for _ = 0 to stealers - 1 do
-    match
-      Multicore.spawn
-        (fun () ->
-          let v = Ws_deque.steal_exn t in
-          print_s [%message (v : int)];
-          Barrier.await barrier)
-        ()
-    with
-    | Spawned -> ()
-    | Failed ((), exn, bt) -> Exn.raise_with_original_backtrace exn bt
-  done;
-  Barrier.await barrier;
+  Concurrent.with_scope conc () ~f:(fun s ->
+    for _ = 0 to stealers - 1 do
+      Concurrent.spawn s ~f:(fun _ _ _ ->
+        let v = Ws_deque.steal_exn t in
+        print_s [%message (v : int)])
+    done);
   print_lines_sorted [%expect.output];
   [%expect
     {|
@@ -84,6 +77,7 @@ let%expect_test "push and steal" =
 ;;
 
 let%expect_test "concurrent workload" =
+  let%with.tilde.stack conc = Concurrent_in_thread.with_concurrent Terminator.never in
   (* The desired number of push events. *)
   let n = 100000 in
   (* The desired number of steal attempts per thief. *)
@@ -101,77 +95,65 @@ let%expect_test "concurrent workload" =
   and popped = Capsule.With_mutex.create (fun () -> ref [])
   (* Histories of stolen elements. *)
   and stolen = Capsule.With_mutex.create (fun () -> Array.create ~len:thieves []) in
-  let push_back v x =
-    Capsule.With_mutex.iter v ~f:(fun l -> l := Modes.Contended.cross x :: !l)
+  let push_back w v x =
+    Capsule.With_mutex.iter w v ~f:(fun l -> l := Modes.Contended.cross x :: !l)
   in
-  (* The owner thread. *)
-  let barrier = Barrier.create (thieves + 2) in
-  (match
-     Multicore.spawn
-       (fun () ->
-         let owner = Capsule.Isolated.unwrap owner in
-         let n = ref n in
-         let push () =
-           let x : int = fresh () in
-           Ws_deque.push owner x;
-           push_back pushed x;
-           Int.decr n
-         and pop () =
-           match pop' owner with
-           | Null -> false
-           | This x ->
-             push_back popped x;
-             true
-         in
-         let rec loop () =
-           if !n > 0
-           then (
-             (* More pushes are allowed. *)
-             (* Choose between pushing and popping; then continue. *)
-             if Random.bool () then push () else ignore (pop () : bool);
-             loop ())
-           else if (* No more pushes are allowed. Pop and continue. *)
-                   pop ()
-           then loop ()
-         in
-         loop ();
-         Barrier.await barrier)
-       ()
-   with
-   | Spawned -> ()
-   | Failed ((), exn, bt) -> Exn.raise_with_original_backtrace exn bt);
-  (* The thief threads. *)
-  for i = 0 to thieves - 1 do
-    match
-      Multicore.spawn
-        (fun () ->
-          let steal () =
-            match Ws_deque.steal stealer with
-            | Null -> Basement.Stdlib_shim.Domain.cpu_relax ()
-            | This x ->
-              Capsule.With_mutex.iter stolen ~f:(fun stolen ->
-                stolen.(i) <- x :: stolen.(i))
-          in
-          for _ = 1 to attempts do
-            steal ()
-          done;
-          Barrier.await barrier)
-        ()
-    with
-    | Spawned -> ()
-    | Failed ((), exn, bt) -> Exn.raise_with_original_backtrace exn bt
-  done;
-  (* Wait for every thread to complete. *)
-  Barrier.await barrier;
+  Concurrent.with_scope conc () ~f:(fun s ->
+    (* The owner thread. *)
+    Concurrent.spawn s ~f:(fun _ _ conc ->
+      let owner = Capsule.Isolated.unwrap owner in
+      let n = ref n in
+      let push () =
+        let x : int = fresh () in
+        Ws_deque.push owner x;
+        push_back (Concurrent.await conc) pushed x;
+        Int.decr n
+      and pop () =
+        match pop' owner with
+        | Null -> false
+        | This x ->
+          push_back (Concurrent.await conc) popped x;
+          true
+      in
+      let rec loop () =
+        if !n > 0
+        then (
+          (* More pushes are allowed. *)
+          (* Choose between pushing and popping; then continue. *)
+          if Random.bool () then push () else ignore (pop () : bool);
+          loop ())
+        else if (* No more pushes are allowed. Pop and continue. *)
+                pop ()
+        then loop ()
+      in
+      loop () [@nontail]);
+    (* The thief threads. *)
+    for i = 0 to thieves - 1 do
+      Concurrent.spawn s ~f:(fun _ _ conc ->
+        let steal () =
+          match Ws_deque.steal stealer with
+          | Null -> Basement.Stdlib_shim.Domain.cpu_relax ()
+          | This x ->
+            Capsule.With_mutex.iter (Concurrent.await conc) stolen ~f:(fun stolen ->
+              stolen.(i) <- x :: stolen.(i))
+            [@nontail]
+        in
+        for _ = 1 to attempts do
+          steal ()
+        done)
+    done);
   (* Check that the elements that have been popped or stolen are exactly the
      elements that have been pushed. Thus, no element is lost, duplicated,
      or created out of thin air. *)
-  let pushed = Capsule.With_mutex.with_lock pushed ~f:(fun p -> !p)
-  and popped = Capsule.With_mutex.with_lock popped ~f:(fun p -> !p) in
+  let pushed =
+    Capsule.With_mutex.with_lock (Concurrent.await conc) pushed ~f:(fun p -> !p)
+  and popped =
+    Capsule.With_mutex.with_lock (Concurrent.await conc) popped ~f:(fun p -> !p)
+  in
   let npushed = List.length pushed
   and npopped = List.length popped
   and nstolen =
-    Capsule.With_mutex.with_lock stolen ~f:(fun stolen ->
+    Capsule.With_mutex.with_lock (Concurrent.await conc) stolen ~f:(fun stolen ->
       Array.fold ~init:0 ~f:(fun accu stolen -> accu + List.length stolen) stolen)
   in
   print_s [%message (npushed : int) (npopped + nstolen : int)];
@@ -181,7 +163,7 @@ let%expect_test "concurrent workload" =
      ("npopped + nstolen" 100000))
     |}];
   let stolen =
-    Capsule.With_mutex.with_lock stolen ~f:(fun stolen ->
+    Capsule.With_mutex.with_lock (Concurrent.await conc) stolen ~f:(fun stolen ->
       Array.fold ~init:[] ~f:( @ ) stolen)
   in
   require_sets_are_equal
@@ -190,7 +172,7 @@ let%expect_test "concurrent workload" =
   [%expect {| |}]
 ;;
 
-module One_producer = struct
+module%test One_producer = struct
   let%quick_test "pops are in order" =
     fun (l : int list) (l' : int Nonempty_list.t) ->
     let l' = Nonempty_list.to_list l' in
@@ -217,7 +199,7 @@ module One_producer = struct
   ;;
 end
 
-module One_producer_one_stealer = struct
+module%test One_producer_one_stealer = struct
   (* TEST 1 with 1 producer, 1 stealer and sequential execution. Producer domain pushes a
      list of value THEN a stealer domain steals.
 
@@ -227,25 +209,18 @@ module One_producer_one_stealer = struct
 
   let%quick_test ("steals are in order" [@trials 10]) =
     fun (l : int list) (n : (int[@generator Generator.small_strictly_positive_int])) ->
+    let%with.tilde.stack conc = Concurrent_in_thread.with_concurrent Terminator.never in
     (* Main domain pushes all elements of [l] in order. *)
     let stealer = l |> Ws_deque.of_list in
     (* Then the stealer domain steals [n] times. The output list is composed of all stolen
        value. If an [Exit] is raised, it is register as a [None] value in the returned
        list.*)
-    let barrier = Barrier.create 2 in
     let steal_list : int option list Atomic.t = Atomic.make [] in
-    (match
-       Multicore.spawn
-         (fun () ->
-           List.init n ~f:(fun _ -> steal' stealer |> Or_null.to_option)
-           |> List.rev
-           |> Atomic.set steal_list;
-           Barrier.await barrier)
-         ()
-     with
-     | Spawned -> ()
-     | Failed ((), exn, bt) -> Exn.raise_with_original_backtrace exn bt);
-    Barrier.await barrier;
+    Concurrent.with_scope conc () ~f:(fun s ->
+      Concurrent.spawn s ~f:(fun _ _ _ ->
+        List.init n ~f:(fun _ -> steal' stealer |> Or_null.to_option)
+        |> List.rev
+        |> Atomic.set steal_list));
     let steal_list = Atomic.get steal_list in
     (* The stolen values should be the [n]th first elements of [l]*)
     let expected_stolen = List.take l n in
@@ -273,6 +248,7 @@ module One_producer_one_stealer = struct
 
   let%quick_test ("parallel pushes and steals" [@trials 10]) =
     fun (l : int list) (n : (int[@generator Generator.small_strictly_positive_int])) ->
+    let%with.tilde.stack conc = Concurrent_in_thread.with_concurrent Terminator.never in
     (* Initialization *)
     let owner, { aliased = stealer } = create_owner_and_stealer () in
     let barrier = Barrier.create 2 in
@@ -280,25 +256,18 @@ module One_producer_one_stealer = struct
        it is registered as [Some v] in the returned list whereas any
        [Exit] raised is registered as a [None].*)
     let steal_list : int option list Atomic.t = Atomic.make [] in
-    (match
-       Multicore.spawn
-         (fun () ->
-           Barrier.await barrier;
-           List.init n ~f:(fun _ -> steal' stealer |> Or_null.to_option)
-           |> List.rev
-           |> Atomic.set steal_list;
-           Barrier.await barrier)
-         ()
-     with
-     | Spawned -> ()
-     | Failed ((), exn, bt) -> Exn.raise_with_original_backtrace exn bt);
-    Barrier.await barrier;
-    (* Main domain pushes. *)
-    let owner = Capsule.Isolated.unwrap owner in
-    List.iter l ~f:(fun (elt : int) ->
-      Ws_deque.push owner (elt : int);
-      Basement.Stdlib_shim.Domain.cpu_relax ());
-    Barrier.await barrier;
+    Concurrent.with_scope conc () ~f:(fun s ->
+      Concurrent.spawn s ~f:(fun _ _ conc ->
+        Barrier.await (Concurrent.await conc) barrier;
+        List.init n ~f:(fun _ -> steal' stealer |> Or_null.to_option)
+        |> List.rev
+        |> Atomic.set steal_list);
+      Barrier.await (Concurrent.Spawn.await s) barrier;
+      (* Main domain pushes. *)
+      let owner = Capsule.Isolated.unwrap owner in
+      List.iter l ~f:(fun (elt : int) ->
+        Ws_deque.push owner (elt : int);
+        Basement.Stdlib_shim.Domain.cpu_relax ()));
     let steal_list = Atomic.get steal_list in
     (* We don't know how the pushes and the steals are interleaved
        but we can check that if [m] values have been stolen, they are
@@ -327,6 +296,7 @@ module One_producer_one_stealer = struct
     fun (l : int list)
       (nsteal : (int[@generator Generator.small_strictly_positive_int]))
       (npop : (int[@generator Generator.small_strictly_positive_int])) ->
+    let%with.tilde.stack conc = Concurrent_in_thread.with_concurrent Terminator.never in
     if nsteal + npop > List.length l
     then (
       (* Initialization - sequential pushes *)
@@ -337,25 +307,18 @@ module One_producer_one_stealer = struct
          it is registered as [Some v] in the returned list whereas any [Exit]
          raised, it is registered as a [None].*)
       let steal_list : int option list Atomic.t = Atomic.make [] in
-      (match
-         Multicore.spawn
-           (fun () ->
-             Barrier.await barrier;
-             List.init nsteal ~f:(fun _ -> steal' stealer |> Or_null.to_option)
-             |> List.rev
-             |> Atomic.set steal_list;
-             Barrier.await barrier)
-           ()
-       with
-       | Spawned -> ()
-       | Failed ((), exn, bt) -> Exn.raise_with_original_backtrace exn bt);
-      Barrier.await barrier;
-      (* Main domain pops and builds a list of popped values. *)
       let pop_list =
-        let owner = Capsule.Isolated.unwrap owner in
-        List.init npop ~f:(fun _ -> pop' owner |> Or_null.to_option) |> List.rev
+        Concurrent.with_scope conc () ~f:(fun s ->
+          Concurrent.spawn s ~f:(fun _ _ conc ->
+            Barrier.await (Concurrent.await conc) barrier;
+            List.init nsteal ~f:(fun _ -> steal' stealer |> Or_null.to_option)
+            |> List.rev
+            |> Atomic.set steal_list);
+          Barrier.await (Concurrent.Spawn.await s) barrier;
+          (* Main domain pops and builds a list of popped values. *)
+          let owner = Capsule.Isolated.unwrap owner in
+          List.init npop ~f:(fun _ -> pop' owner |> Or_null.to_option) |> List.rev)
       in
-      Barrier.await barrier;
       let steal_list = Atomic.get steal_list in
       (* All the pushes are done sequentially before the run so whatever
          how pops and steals are interleaved if [npop + nsteal <= npush]
@@ -382,29 +345,26 @@ module%test One_producer_two_stealers = struct
     fun (l : int list)
       (ns1 : (int[@generator Generator.small_strictly_positive_int]))
       (ns2 : (int[@generator Generator.small_strictly_positive_int])) ->
+    let%with.tilde.stack conc = Concurrent_in_thread.with_concurrent Terminator.never in
     (* Initialization *)
     let stealer = l |> Ws_deque.of_list in
     let barrier = Barrier.create 2 in
-    let done_barrier = Barrier.create 3 in
     let result1 = Atomic.make [] in
     let result2 = Atomic.make [] in
     (* Steal calls *)
-    let multiple_steal deque nsteal result =
-      Barrier.await barrier;
+    let multiple_steal w deque nsteal result =
+      Barrier.await w barrier;
       let res = Array.create ~len:nsteal None in
       for i = 0 to nsteal - 1 do
         res.(i) <- steal' deque |> Or_null.to_option
       done;
-      Atomic.set result (Array.to_list res);
-      Barrier.await done_barrier
+      Atomic.set result (Array.to_list res)
     in
-    (match Multicore.spawn (fun () -> multiple_steal stealer ns1 result1) () with
-     | Spawned -> ()
-     | Failed ((), exn, bt) -> Exn.raise_with_original_backtrace exn bt);
-    (match Multicore.spawn (fun () -> multiple_steal stealer ns2 result2) () with
-     | Spawned -> ()
-     | Failed ((), exn, bt) -> Exn.raise_with_original_backtrace exn bt);
-    Barrier.await done_barrier;
+    Concurrent.with_scope conc () ~f:(fun s ->
+      Concurrent.spawn s ~f:(fun _ _ conc ->
+        multiple_steal (Concurrent.await conc) stealer ns1 result1 [@nontail]);
+      Concurrent.spawn s ~f:(fun _ _ conc ->
+        multiple_steal (Concurrent.await conc) stealer ns2 result2 [@nontail]));
     let steal_list1 = Atomic.get result1 in
     let steal_list2 = Atomic.get result2 in
     let stolen1 = List.filter_opt steal_list1 in
@@ -436,11 +396,6 @@ module%test One_producer_two_stealers = struct
       (expected_stolen, stolen1, stolen2)
   ;;
 end
-
-module type Empty = sig end
-
-let () = ignore (module One_producer : Empty)
-let () = ignore (module One_producer_one_stealer : Empty)
 
 let%expect_test "blit_circularly" =
   let test_case ~src ~src_pos ~dst ~dst_pos ~len =
