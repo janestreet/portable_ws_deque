@@ -222,8 +222,6 @@ let pop_exn q = pop_as q Value
 let pop q = pop_as q Unboxed
 let pop_opt q = pop_as q Option
 
-external magic_uncontended : 'a -> 'a = "%identity"
-
 let rec steal_as : type a r. a t -> Backoff.t -> (a, r) poly -> r =
   fun q backoff poly ->
   (* Read of [top] does not require a fence at this point, but the read of
@@ -236,7 +234,7 @@ let rec steal_as : type a r. a t -> Backoff.t -> (a, r) poly -> r =
   then (
     (* Magic: we are protecting any accesses to this array behind atomic operations on
        [q.bottom] *)
-    let a = (magic_uncontended q).tab in
+    let a = (Obj.magic_uncontended q).tab in
     let out = Array.unsafe_get a (t land (Array.length a - 1)) in
     match Atomic.compare_and_set q.top ~if_phys_equal_to:t ~replace_with:(t + 1) with
     | Set_here ->

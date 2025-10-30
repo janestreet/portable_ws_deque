@@ -1,4 +1,4 @@
-open! Base
+open! Core
 open Portable
 open Await
 open Base_quickcheck
@@ -27,12 +27,12 @@ let pop' (deque : int Ws_deque.t) =
 
 let create_owner_and_stealer () =
   let owner = Capsule.Isolated.create Ws_deque.create in
-  Capsule.Isolated.get_id_contended owner
+  Capsule.Isolated.get_id owner
 ;;
 
 let owner_and_stealer_of_list l =
   let owner = Capsule.Isolated.create (fun () -> Ws_deque.of_list l) in
-  Capsule.Isolated.get_id_contended owner
+  Capsule.Isolated.get_id owner
 ;;
 
 let%expect_test "empty" =
