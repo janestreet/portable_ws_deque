@@ -166,7 +166,9 @@ type ('a, _ : value_or_null) poly =
   | Unboxed : ('a, 'a or_null) poly
   | Value : ('a, 'a) poly
 
-let pop_as : type a (r : value_or_null). a t -> (a, r) poly -> r @ contended portable =
+let pop_as
+  : type a (r : value_or_null). a t @ local -> (a, r) poly -> r @ contended portable
+  =
   fun q poly ->
   let b = Atomic.fetch_and_add q.bottom (-1) - 1 in
   (* Read of [top] at this point requires no fence as we simply need to ensure
@@ -222,11 +224,9 @@ let pop_exn q = pop_as q Value
 let pop q = pop_as q Unboxed
 let pop_opt q = pop_as q Option
 
-external magic_uncontended : 'a @ contended -> 'a @@ portable = "%identity"
-
 let rec steal_as
   : type a (r : value_or_null).
-    a t @ contended -> Backoff.t -> (a, r) poly -> r @ contended portable
+    a t @ contended local -> Backoff.t -> (a, r) poly -> r @ contended portable
   =
   fun q backoff poly ->
   (* Read of [top] does not require a fence at this point, but the read of
@@ -239,7 +239,7 @@ let rec steal_as
   then (
     (* Magic: we are protecting any accesses to this array behind atomic operations on
        [q.bottom] *)
-    let a = (magic_uncontended q).tab in
+    let a = (Obj.magic_uncontended q).tab in
     let out = Array.unsafe_get a (t land (Array.length a - 1)) in
     match Atomic.compare_and_set q.top ~if_phys_equal_to:t ~replace_with:(t + 1) with
     | Set_here ->

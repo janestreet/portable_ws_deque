@@ -1,4 +1,4 @@
-open! Base
+open! Core
 open Portable
 open Await
 open Base_quickcheck
@@ -27,12 +27,12 @@ let pop' (deque : int Ws_deque.t) =
 
 let create_owner_and_stealer () =
   let owner = Capsule.Isolated.create Ws_deque.create in
-  Capsule.Isolated.get_id_contended owner
+  Capsule.Isolated.get_id owner
 ;;
 
 let owner_and_stealer_of_list l =
   let owner = Capsule.Isolated.create (fun () -> Ws_deque.of_list l) in
-  Capsule.Isolated.get_id_contended owner
+  Capsule.Isolated.get_id owner
 ;;
 
 let%expect_test "empty" =
@@ -85,7 +85,7 @@ let%expect_test "concurrent workload" =
   (* The number of thieves. *)
   let thieves = if Sys.word_size_in_bits >= 64 then 16 else 2 in
   (* The queue. *)
-  let owner, { aliased = stealer } = create_owner_and_stealer () in
+  let #(owner, { aliased = stealer }) = create_owner_and_stealer () in
   (* A generator of fresh elements. *)
   let c = Atomic.make 0 in
   let fresh () = Atomic.fetch_and_add c 1 in
@@ -250,7 +250,7 @@ module%test One_producer_one_stealer = struct
     fun (l : int list) (n : (int[@generator Generator.small_strictly_positive_int])) ->
     let%with.tilde.stack conc = Concurrent_in_thread.with_concurrent Terminator.never in
     (* Initialization *)
-    let owner, { aliased = stealer } = create_owner_and_stealer () in
+    let #(owner, { aliased = stealer }) = create_owner_and_stealer () in
     let barrier = Barrier.create 2 in
     (* The stealer domain steals n times. If a value [v] is stolen,
        it is registered as [Some v] in the returned list whereas any
@@ -300,7 +300,7 @@ module%test One_producer_one_stealer = struct
     if nsteal + npop > List.length l
     then (
       (* Initialization - sequential pushes *)
-      let owner, { aliased = stealer } = owner_and_stealer_of_list l in
+      let #(owner, { aliased = stealer }) = owner_and_stealer_of_list l in
       let barrier = Barrier.create 2 in
       Random.self_init ~allow_in_tests:true ();
       (* The stealer domain steals [nsteal] times. If a value [v] is stolen,
