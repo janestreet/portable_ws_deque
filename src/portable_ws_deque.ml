@@ -60,13 +60,13 @@ module _ = struct
 end
 
 let create () =
-  let top = Atomic.make_alone 0 in
+  let top = Atomic.make ~padded:true 0 in
   let tab =
     Array.create
       ~len:min_capacity
       (ref (Uopt.none |> Portability_hacks.magic_uncontended__promise_deeply_immutable))
   in
-  let bottom = Atomic.make_alone 0 in
+  let bottom = Atomic.make ~padded:true 0 in
   let top_cache = ref 0 |> Portable_common.Padding.copy_as_padded in
   { top; bottom; top_cache; tab } |> Portable_common.Padding.copy_as_padded
 ;;
@@ -127,8 +127,8 @@ let realloc a t b sz new_sz =
 
 let push q v =
   let v = ref (Uopt.some { portended = v }) in
-  (* Read of [bottom] by the owner simply does not require a fence as the
-     [bottom] is only mutated by the owner. *)
+  (* Read of [bottom] by the owner simply does not require a fence as the [bottom] is only
+     mutated by the owner. *)
   let b = Atomic.Expert.fenceless_get q.bottom in
   let t_cache = !(q.top_cache) in
   let a = q.tab in
@@ -169,8 +169,8 @@ type ('a, _) poly =
 let pop_as : type a r. a t -> (a, r) poly -> r =
   fun q poly ->
   let b = Atomic.fetch_and_add q.bottom (-1) - 1 in
-  (* Read of [top] at this point requires no fence as we simply need to ensure
-     that the read happens after updating [bottom]. *)
+  (* Read of [top] at this point requires no fence as we simply need to ensure that the
+     read happens after updating [bottom]. *)
   let t = Atomic.Expert.fenceless_get q.top in
   let size = b - t in
   if 0 < size
@@ -189,8 +189,8 @@ let pop_as : type a r. a t -> (a, r) poly -> r =
     | Value -> res.portended)
   else if b = t
   then (
-    (* Whether or not the [compare_and_set] below succeeds, [top_cache] can be
-       updated, because in either case [top] has been incremented. *)
+    (* Whether or not the [compare_and_set] below succeeds, [top_cache] can be updated,
+       because in either case [top] has been incremented. *)
     q.top_cache := t + 1;
     let got = Atomic.compare_and_set q.top ~if_phys_equal_to:t ~replace_with:(t + 1) in
     Atomic.set q.bottom (b + 1);
@@ -224,9 +224,9 @@ let pop_opt q = pop_as q Option
 
 let rec steal_as : type a r. a t -> Backoff.t -> (a, r) poly -> r =
   fun q backoff poly ->
-  (* Read of [top] does not require a fence at this point, but the read of
-     [top] must happen before the read of [bottom].  The write of [top] later
-     has no effect in case we happened to read an old value of [top]. *)
+  (* Read of [top] does not require a fence at this point, but the read of [top] must
+     happen before the read of [bottom]. The write of [top] later has no effect in case we
+     happened to read an old value of [top]. *)
   let t = Atomic.Expert.fenceless_get q.top in
   let b = Atomic.get q.bottom in
   let size = b - t in
