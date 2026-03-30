@@ -6,6 +6,7 @@ bug-reports: "https://github.com/janestreet/portable_ws_deque/issues"
 dev-repo: "git+https://github.com/janestreet/portable_ws_deque.git"
 doc: "https://ocaml.janestreet.com/ocaml-core/latest/doc/portable_ws_deque/index.html"
 license: "MIT"
+x-maintenance-intent: ["(latest)"]
 build: [
   ["dune" "build" "-p" name "-j" jobs]
 ]
