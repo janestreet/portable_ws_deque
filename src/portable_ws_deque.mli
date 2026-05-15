@@ -26,7 +26,7 @@ val create : unit -> 'a t
 (** [push owner v] adds [v] to the front of the queue [owner]. *)
 val push : 'a t -> 'a -> unit
 
-val of_list : 'a list -> 'a t
+val of_list : 'a. 'a list -> 'a t
 
 (** [pop_exn owner] removes and returns the first element in queue [owner].
 

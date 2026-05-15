@@ -26,13 +26,13 @@ let pop' (deque : int Ws_deque.t) =
 ;;
 
 let create_owner_and_stealer () =
-  let owner = Capsule.Isolated.create Ws_deque.create in
-  Capsule.Isolated.get_id owner
+  let owner = Capsule.Owned.create (fun () -> { aliased = Ws_deque.create () }) in
+  Capsule.Owned.get_contended owner
 ;;
 
 let owner_and_stealer_of_list l =
-  let owner = Capsule.Isolated.create (fun () -> Ws_deque.of_list l) in
-  Capsule.Isolated.get_id owner
+  let owner = Capsule.Owned.create (fun () -> { aliased = Ws_deque.of_list l }) in
+  Capsule.Owned.get_contended owner
 ;;
 
 let%expect_test "empty" =
@@ -55,7 +55,7 @@ let%expect_test "push and pop" =
 ;;
 
 let%expect_test "push and steal" =
-  let%with.tilde.stack conc = Concurrent_in_thread.with_blocking Terminator.never in
+  let%with.tilde.stack conc = Concurrent_in_thread.with_blocking Terminator.unkillable in
   let t = Ws_deque.create () in
   Ws_deque.push t 1;
   Ws_deque.push t 10;
@@ -77,7 +77,7 @@ let%expect_test "push and steal" =
 ;;
 
 let%expect_test "concurrent workload" =
-  let%with.tilde.stack conc = Concurrent_in_thread.with_blocking Terminator.never in
+  let%with.tilde.stack conc = Concurrent_in_thread.with_blocking Terminator.unkillable in
   (* The desired number of push events. *)
   let n = 100000 in
   (* The desired number of steal attempts per thief. *)
@@ -101,11 +101,11 @@ let%expect_test "concurrent workload" =
   Concurrent.with_scope conc () ~f:(fun s ->
     (* The owner thread. *)
     Concurrent.spawn s ~f:(fun _ _ conc ->
-      let owner = Capsule.Isolated.unwrap owner in
+      let owner = (Capsule.Owned.unwrap owner).aliased in
       let n = ref n in
       let push () =
-        let x : int = fresh () in
-        Ws_deque.push owner x;
+        let x = fresh () in
+        Ws_deque.push owner (x : int);
         push_back (Concurrent.sync conc) pushed x;
         Int.decr n
       and pop () =
@@ -218,7 +218,9 @@ module%test One_producer_one_stealer = struct
       (l : int list)
       (n : (int[@generator Generator.small_strictly_positive_int]))
       =
-      let%with.tilde.stack conc = Concurrent_in_thread.with_blocking Terminator.never in
+      let%with.tilde.stack conc =
+        Concurrent_in_thread.with_blocking Terminator.unkillable
+      in
       (* Main domain pushes all elements of [l] in order. *)
       let stealer = l |> Ws_deque.of_list in
       (* Then the stealer domain steals [n] times. The output list is composed of all
@@ -262,7 +264,9 @@ module%test One_producer_one_stealer = struct
       (l : int list)
       (n : (int[@generator Generator.small_strictly_positive_int]))
       =
-      let%with.tilde.stack conc = Concurrent_in_thread.with_blocking Terminator.never in
+      let%with.tilde.stack conc =
+        Concurrent_in_thread.with_blocking Terminator.unkillable
+      in
       (* Initialization *)
       let owner, { aliased = stealer } = create_owner_and_stealer () in
       let barrier = Await.Barrier.create 2 in
@@ -278,7 +282,7 @@ module%test One_producer_one_stealer = struct
           |> Atomic.set steal_list);
         Await.Barrier.await (Concurrent.Spawn.await s) barrier;
         (* Main domain pushes. *)
-        let owner = Capsule.Isolated.unwrap owner in
+        let owner = (Capsule.Owned.unwrap owner).aliased in
         List.iter l ~f:(fun (elt : int) ->
           Ws_deque.push owner (elt : int);
           Basement.Stdlib_shim.Domain.cpu_relax ()));
@@ -313,7 +317,9 @@ module%test One_producer_one_stealer = struct
       (nsteal : (int[@generator Generator.small_strictly_positive_int]))
       (npop : (int[@generator Generator.small_strictly_positive_int]))
       =
-      let%with.tilde.stack conc = Concurrent_in_thread.with_blocking Terminator.never in
+      let%with.tilde.stack conc =
+        Concurrent_in_thread.with_blocking Terminator.unkillable
+      in
       if nsteal + npop > List.length l
       then (
         (* Initialization - sequential pushes *)
@@ -333,7 +339,7 @@ module%test One_producer_one_stealer = struct
               |> Atomic.set steal_list);
             Await.Barrier.await (Concurrent.Spawn.await s) barrier;
             (* Main domain pops and builds a list of popped values. *)
-            let owner = Capsule.Isolated.unwrap owner in
+            let owner = (Capsule.Owned.unwrap owner).aliased in
             List.init npop ~f:(fun _ -> pop' owner |> Or_null.to_option) |> List.rev)
         in
         let steal_list = Atomic.get steal_list in
@@ -366,7 +372,9 @@ module%test One_producer_two_stealers = struct
       (ns1 : (int[@generator Generator.small_strictly_positive_int]))
       (ns2 : (int[@generator Generator.small_strictly_positive_int]))
       =
-      let%with.tilde.stack conc = Concurrent_in_thread.with_blocking Terminator.never in
+      let%with.tilde.stack conc =
+        Concurrent_in_thread.with_blocking Terminator.unkillable
+      in
       (* Initialization *)
       let stealer = l |> Ws_deque.of_list in
       let barrier = Await.Barrier.create 2 in
