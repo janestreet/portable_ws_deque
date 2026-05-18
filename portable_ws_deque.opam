@@ -15,10 +15,9 @@ depends: [
   "base"
   "basement"
   "portable"
-  "uopt"
   "dune"     {>= "3.17.0"}
 ]
-available: arch != "arm32" & arch != "x86_32"
+available: arch != "x86_32"
 synopsis: "Portable work-stealing deque for OxCaml"
 description: "
 Portable lock-free chase-lev work-stealing deque for OxCaml
